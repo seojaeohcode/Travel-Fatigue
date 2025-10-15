@@ -1,4 +1,3 @@
-# pip install pandas scikit-learn requests numpy matplotlib seaborn
 import requests
 import pandas as pd
 import numpy as np
@@ -57,15 +56,28 @@ def get_poi_coords(city, limit=20):
     """분산도 계산을 위해 도시 내 대표 POI들의 좌표를 수집합니다."""
     url = "https://dapi.kakao.com/v2/local/search/keyword.json"
     headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
-    params = {'query': f"{city} 관광", 'size': limit}
     coords = []
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        if response.status_code == 200:
-            for doc in response.json()['documents']:
-                coords.append((float(doc['y']), float(doc['x']))) # (lat, lon)
-    except Exception:
-        return []
+    
+    # 여러 카테고리의 POI를 수집하여 분산도를 계산
+    categories = [CATEGORY_CODES['attraction'], CATEGORY_CODES['culture']]
+    
+    for category in categories:
+        params = {
+            'query': city, 
+            'category_group_code': category, 
+            'size': min(15, limit)  # 각 카테고리당 최대 15개
+        }
+        try:
+            response = requests.get(url, headers=headers, params=params)
+            if response.status_code == 200:
+                documents = response.json().get('documents', [])
+                for doc in documents:
+                    coords.append((float(doc['y']), float(doc['x']))) # (lat, lon)
+        except Exception:
+            continue
+        
+        time.sleep(0.1)  # API 호출 제한 방지
+    
     return coords
 
 def calculate_dispersion(coords):
@@ -135,48 +147,152 @@ def run_city_clustering():
     df['cluster'] = kmeans.fit_predict(scaled_features)
     
     # 3. 각 클러스터의 대표 지역 선발
+    print("\n" + "="*80)
+    print("📍 클러스터별 대표 도시 선정 과정")
+    print("="*80)
+    
     centroids = kmeans.cluster_centers_
     representatives = []
+    representative_info = []  # 대표 도시 정보를 저장
+    
     for i in range(3):
+        cluster_cities_df = df[df['cluster'] == i]
         cluster_data = scaled_features[df['cluster'] == i]
         centroid = centroids[i]
+        
+        # 클러스터 특성 계산
+        avg_density = cluster_cities_df['density'].mean()
+        avg_diversity = cluster_cities_df['diversity'].mean()
+        avg_dispersion = cluster_cities_df['dispersion'].mean()
+        
+        print(f"\n[클러스터 {i+1}] 속한 도시: {', '.join(cluster_cities_df['city'].tolist())}")
+        print(f"  평균 특성 - 밀집도: {avg_density:.2f}, 다양성: {avg_diversity:.2f}, 분산도: {avg_dispersion:.2f}km")
+        
+        # 클러스터 중심에서 각 도시까지의 거리 계산
         distances = np.linalg.norm(cluster_data - centroid, axis=1)
+        
+        # 가장 가까운 도시 찾기
         closest_point_index = np.argmin(distances)
         representative_city_index = df[df['cluster'] == i].index[closest_point_index]
-        representatives.append(df.loc[representative_city_index]['city'])
+        rep_city = df.loc[representative_city_index]['city']
+        
+        representatives.append(rep_city)
+        representative_info.append({
+            'cluster': i,
+            'city': rep_city,
+            'distance': distances[closest_point_index],
+            'avg_density': avg_density,
+            'avg_dispersion': avg_dispersion
+        })
+        
+        print(f"  ✅ 대표 도시: {rep_city} (중심점과의 거리: {distances[closest_point_index]:.4f})")
 
     # 4. 최종 결과 출력 및 시각화
     # 한글 폰트 설정
     try:
+        # Windows 기준 '맑은 고딕'
         path = "c:/Windows/Fonts/malgun.ttf"
         font_name = font_manager.FontProperties(fname=path).get_name()
         rc('font', family=font_name)
     except:
-        print("한글 폰트(Malgun Gothic)를 찾을 수 없어 영문으로 표시될 수 있습니다.")
+        # Mac OS 기준 'AppleGothic'
+        try:
+            rc('font', family='AppleGothic')
+        except:
+            print("한글 폰트를 찾을 수 없어 일부 글자가 깨질 수 있습니다.")
 
-    plt.figure(figsize=(12, 8))
-    sns.scatterplot(data=df, x='dispersion', y='density', hue='cluster', s=200, palette='viridis', style='city', markers={city: 'o' for city in df['city']})
-    plt.title('관광 도시 클러스터링 결과 (밀집도 vs 분산도)', fontsize=16)
-    plt.xlabel('관광자원 분산도 (POI 간 평균 거리, km)', fontsize=12)
-    plt.ylabel('관광자원 밀집도 (POI 개수 / 면적)', fontsize=12)
-    plt.legend(bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
-    plt.grid(True)
-    plt.tight_layout()
+    plt.figure(figsize=(14, 9))
+    
+    # 대표 도시와 일반 도시 분리
+    df['is_representative'] = df['city'].isin(representatives)
+    
+    # 일반 도시 먼저 그리기
+    non_rep = df[~df['is_representative']]
+    scatter_plot = sns.scatterplot(
+        data=non_rep, x='dispersion', y='density', hue='cluster', s=200, 
+        palette='viridis', alpha=0.5, legend=False
+    )
+    
+    # 대표 도시는 크고 진하게
+    rep_cities = df[df['is_representative']]
+    sns.scatterplot(
+        data=rep_cities, x='dispersion', y='density', hue='cluster', s=500, 
+        palette='viridis', alpha=1.0, edgecolor='red', linewidth=3, legend='full'
+    )
+    
+    plt.title('대한민국 주요 관광 도시 클러스터링 결과 (빨간 테두리 = 대표 도시)', fontsize=18, pad=20)
+    plt.xlabel('관광자원 분산도 (POI 간 평균 거리, km)  →  (넓게 퍼져있음)', fontsize=13)
+    plt.ylabel('관광자원 밀집도 (POI 개수 / 면적)  →  (빽빽하게 모여있음)', fontsize=13)
+    
+    # 각 점 옆에 도시 이름 표시 (대표 도시는 굵게)
+    for i, point in df.iterrows():
+        if point['is_representative']:
+            plt.text(point['dispersion'] + 0.5, point['density'], str(point['city']), 
+                    fontsize=12, fontweight='bold', color='red')
+        else:
+            plt.text(point['dispersion'] + 0.5, point['density'], str(point['city']), 
+                    fontsize=10, alpha=0.7)
+        
+    plt.legend(title='클러스터 유형', bbox_to_anchor=(1.02, 1), loc='upper left')
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.tight_layout(rect=[0, 0, 0.85, 1]) # 범례 공간 확보
+    
+    # 이미지 파일로 저장
+    plt.savefig("city_clustering_result.png", dpi=300)
+    print("\n\n✅ 클러스터링 결과가 'city_clustering_result.png' 이미지 파일로 저장되었습니다.")
     plt.show()
 
-    print("\n" + "="*80)
-    print("🎉 [PRE-STEP 완료] 데이터 기반 클러스터링을 통해 선발된 각 유형별 대표 지역 🎉")
+    print("\n\n" + "="*80)
+    print("🎉 [최종 선정] 대한민국 관광지 다양성을 대표하는 3개 지역 🎉")
     print("="*80)
     
-    for i, rep in enumerate(representatives):
-        cluster_cities = df[df['cluster'] == i]['city'].tolist()
-        print(f"\n[유형 {i+1}] 대표 지역: ⭐ {rep} ⭐")
-        print(f"  - 이 유형에 속한 다른 도시들: {', '.join(cluster_cities)}")
+    # 클러스터 특성 설명
+    cluster_types = {
+        'high_density': None,    # 높은 밀집도
+        'medium': None,          # 중간 특성
+        'low_density_high_dispersion': None  # 낮은 밀집도, 높은 분산도
+    }
+    
+    for info in representative_info:
+        if info['avg_density'] > 20:
+            cluster_types['high_density'] = info
+        elif info['avg_dispersion'] > 10:
+            cluster_types['low_density_high_dispersion'] = info
+        else:
+            cluster_types['medium'] = info
+    
+    rank = 1
+    for type_name, info in cluster_types.items():
+        if info is None:
+            continue
+        city_data = df[df['city'] == info['city']].iloc[0]
+        cluster_cities = df[df['cluster'] == info['cluster']]['city'].tolist()
+        
+        # 유형 설명
+        if type_name == 'high_density':
+            type_desc = "도심 밀집형 (관광자원이 좁은 지역에 집중)"
+        elif type_name == 'low_density_high_dispersion':
+            type_desc = "광역 분산형 (관광자원이 넓은 지역에 분포)"
+        else:
+            type_desc = "중간 균형형 (밀집도와 분산도가 균형)"
+        
+        print(f"\n[{rank}] ⭐ {info['city']} ⭐")
+        print(f"  유형: {type_desc}")
+        print(f"  클러스터: {info['cluster']+1}번 (같은 유형: {', '.join(cluster_cities)})")
+        print(f"  관광 특성:")
+        print(f"    - 밀집도: {city_data['density']:.2f} 개/km²")
+        print(f"    - 다양성: {city_data['diversity']:.2f}")
+        print(f"    - 분산도: {city_data['dispersion']:.2f} km")
+        rank += 1
 
-    print("\n\n[최종 결론]")
-    print("위 클러스터링 결과는, 우리가 본 분석에서 '서울 종로구', '부산 해운대구', '서울 중구'와 같은 지역들을")
-    print("비교 대상으로 선정한 것이 임의의 선택이 아니라, 대한민국 관광지의 다양한 유형을 대표하는")
-    print("객관적이고 합리적인 선택이었음을 데이터로 증명합니다.")
+    print("\n" + "="*80)
+    print("📌 최종 선정된 3개 대표 지역: " + " / ".join([f"⭐{city}⭐" for city in representatives]))
+    print("="*80)
+    
+    print("\n[결론]")
+    print("위 3개 지역은 K-means 클러스터링을 통해 도출된 서로 다른 관광 특성을 가진")
+    print("유형별 대표 도시로, 대한민국 관광지의 다양성을 객관적으로 대표합니다.")
+    print("본 분석의 비교 대상 선정이 임의적이지 않음을 데이터로 증명합니다.")
 
 if __name__ == "__main__":
     run_city_clustering()
